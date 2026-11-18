@@ -9,6 +9,10 @@
   const PY = !!LAB.python;                           // Python lab: Run button and output panel instead of a page preview
   const EX = !!LAB.express;                          // Express lab: server.js runs in a mini browser (js/expresslab.js)
   const startOf = (a, w) => ({ path: (w && w.__labPath) || a.start || '/' });   // the URL an Express preview opens (keeps the student's place)
+  const CON = !!LAB.console && !EX && !PY;           // console lab: programs that log, prompt() and loop; the preview shows the console
+  /* what a page of activity a runs with: Express start URL, or prompt() answers / fixed random numbers (and the console view) */
+  const pageOpts = (a, w, answers) => EX ? startOf(a, w) : Checker.io(a, answers, CON);
+  const splitAnswers = t => String(t || '').split(',').map(x => x.trim()).filter((x, i, all) => x !== '' || all.length > 1);
   const EXAM = LAB.exam || null;                     // exam mode: timed, no feedback until the student finishes
   const SW = !!(EXAM && EXAM.tries);                 // stepwise exam: one step at a time, EXAM.tries trials each, marked and explained per step
   const WORD = SW ? 'Step' : EXAM ? 'Section' : 'Activity';
@@ -18,9 +22,11 @@
   /* ---------------------------------------------------------------- state */
   const NOUN = typeof LAB !== 'undefined' && LAB.exam && LAB.exam.practice ? 'lab' : 'exam';   // exam.practice: a stepwise practice lab, not a test
   const fresh = () => ({ name: '', sid: '', exam: null, run: newRun(1), history: [] });
-  function newRun(n) { return { n, started: new Date().toISOString(), results: {}, drafts: {}, trials: {} }; }
+  function newRun(n) { return { n, started: new Date().toISOString(), results: {}, drafts: {}, trials: {}, quiz: {} }; }
   function loadState() { try { const s = JSON.parse(localStorage.getItem(KEY)); if (s && s.run) return s; } catch (e) {} return fresh(); }
   let state = loadState();
+  /* a stepwise practice lab that gained steps after this student finished it: reopen it, keeping every marked step */
+  if (SW && EXAM.practice && state.exam && state.exam.finished && !state.exam.auto && ACTIVITIES.some(a => !state.run.results[a.id])) state.exam.finished = null;
   const save = () => { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} };
 
   const result = id => state.run.results[id];
@@ -33,6 +39,9 @@
   const bestEver = () => state.history.reduce((m, h) => Math.max(m, h.overall), 0);
   const filesOf = a => Object.keys(FILES).filter(f => a.starter[f] != null || a.solution[f] != null);
   const kind = f => f === 'js' && LAB.jsx ? 'JSX' : f === 'py' ? 'Python' : f.toUpperCase();   // what students call the file they write
+  /* Multiple-choice questions (a.quiz, practice labs only): answered under the code, graded with it on Submit, 1 point each. */
+  const quizOf = a => !EXAM && Array.isArray(a.quiz) ? a.quiz : [];
+  const picksOf = id => ((state.run.quiz || {})[id]) || [];
 
   /* ---------------------------------------------------------------- helpers */
   const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -65,6 +74,18 @@
       else { left.push([A[i], norm(A[i]) ? 'del' : 'same']); i++; }
     }
     return { left, right };
+  }
+  /* JavaScript: red lines that differ from the proper code only by a missing ";" at the end get a note, so students know
+     why they are highlighted (the code usually still runs, but ending statements with ";" is recommended). */
+  function semicolonNote(d, edit) {
+    if (edit !== 'js') return '';
+    const bare = l => l.trim().replace(/\s+/g, ' ').toLowerCase().replace(/;$/, '');
+    const proper = new Set(d.right.filter(([t, k]) => k === 'add' && /;\s*$/.test(t)).map(([t]) => bare(t)));
+    const n = d.left.filter(([t, k]) => k === 'del' && !/;\s*$/.test(t) && proper.has(bare(t))).length;
+    if (!n) return '';
+    return `<p class="semi-note"><strong>${n === 1 ? 'One red line differs' : n + ' red lines differ'} only by the <code>;</code> at the end.</strong> ` +
+      'JavaScript usually runs without it, so a missing semicolon does not cost points. Still, ending each statement with ' +
+      '<code>;</code> is recommended: it is how the proper code is written, and it prevents rare bugs where JavaScript joins two lines into one.</p>';
   }
   const codeLines = (lines) => '<pre class="diff">' + lines.map(([t, k], i) => `<span class="ln ${k}"><i>${i + 1}</i>${esc(t) || ' '}</span>`).join('') + '</pre>';
 
@@ -245,20 +266,24 @@
         </div>` : `<div class="panel preview-panel">
           <div class="preview-bar">
             <div class="seg" role="group" aria-label="What to preview">
-              <button class="on" data-show="mine">${EX ? 'Your server' : 'Your page'}</button><button data-show="goal">Goal</button>
+              <button class="on" data-show="mine">${EX ? 'Your server' : CON ? 'Your program' : 'Your page'}</button><button data-show="goal">Goal</button>
             </div>
-            ${EX ? '' : `<div class="seg" role="group" aria-label="Screen size">
+            ${CON && a.answers ? `<label class="answers-in" title="prompt() returns these, one per question, in order. Separate them with commas.">prompt() answers <input id="answersIn" type="text" spellcheck="false" value="${(a.answers || []).join(', ').replace(/"/g, '&quot;')}"></label>` : ''}
+            ${CON ? '<button class="btn small" id="rerunBtn" title="Run the program again (new random numbers)">↻ Run again</button>' : ''}
+            ${EX || CON ? '' : `<div class="seg" role="group" aria-label="Screen size">
               <button class="on" data-size="desk">Desktop</button><button data-size="phone">Phone</button>
             </div>`}
             <span class="spacer"></span>
-            <span class="live" id="liveNote">${EX ? 'Restarts as you type' : 'Updates as you type'}</span>
+            <span class="live" id="liveNote">${EX ? 'Restarts as you type' : CON ? 'Console · runs as you type' : 'Updates as you type'}</span>
           </div>
-          <div class="frame-wrap${EX ? ' express' : ''}" id="frameWrap"><iframe id="preview" title="${EX ? 'A browser showing what your server sends' : 'Preview of your page'}"></iframe></div>
-          ${files.includes('js') ? `<div class="console" aria-live="polite"><span class="console-label">${EX ? 'Terminal' : 'Console'}</span><pre id="consoleOut">(nothing logged yet)</pre></div>` : ''}
+          <div class="frame-wrap${EX ? ' express' : CON ? ' console-view' : ''}" id="frameWrap"><iframe id="preview" title="${EX ? 'A browser showing what your server sends' : CON ? 'The console of your program' : 'Preview of your page'}"></iframe></div>
+          ${files.includes('js') && !CON ? `<div class="console" aria-live="polite"><span class="console-label">${EX ? 'Terminal' : 'Console'}</span><pre id="consoleOut">(nothing logged yet)</pre></div>` : ''}
         </div>`}
 
+        ${quizBlock(a)}
+
         ${SW ? swNav(a) : EXAM ? examNav(a) : `<div class="submit-row">
-          <p class="muted">Happy with it? Submit to see your score, your mistakes, and the proper code.</p>
+          <p class="muted">Happy with it? Submit to see your score, your mistakes, and the proper code.${quizOf(a).length ? ' Your quiz answers are marked too.' : ''}</p>
           <button class="btn primary big" id="submitBtn">Submit Activity ${a.id}</button>
         </div>`}
 
@@ -276,6 +301,11 @@
       ed[f].clearHistory();
     }
 
+    view.querySelectorAll('.quiz input[type=radio]').forEach(r => r.addEventListener('change', () => {
+      if (!state.run.quiz) state.run.quiz = {};
+      const p = (state.run.quiz[id] = picksOf(id).slice());
+      p[+r.dataset.q] = +r.value; save();
+    }));
     let showing = 'mine';
     if (PY) return wirePython(a, ed);
     const preview = $('#preview');
@@ -286,14 +316,14 @@
       window.__labConsole = setInterval(() => {
         const out = $('#consoleOut'); if (!out) return clearInterval(window.__labConsole);
         const lab = preview.contentWindow && preview.contentWindow.__lab;
-        const text = lab && lab.term ? lab.term.join('\n') : lab ? [...lab.logs, ...[...new Set(lab.warnings || [])].filter(w => !Checker.IGNORE.some(re => re.test(w))).map(w => '△ ' + w.replace(/\s+/g, ' ').slice(0, 300)), ...lab.errors.map(e => '⚠ ' + e)].join('\n') : '';
+        const text = lab && lab.term ? lab.term.filter(t => !(/^△ /.test(t) && Checker.IGNORE.some(re => re.test(t)))).join('\n') : lab ? [...lab.logs, ...[...new Set(lab.warnings || [])].filter(w => !Checker.IGNORE.some(re => re.test(w))).map(w => '△ ' + w.replace(/\s+/g, ' ').slice(0, 300)), ...lab.errors.map(e => '⚠ ' + e)].join('\n') : '';
         if (text !== last) { last = text; out.textContent = text || '(nothing logged yet)'; out.classList.toggle('has-error', !!(lab && lab.errors.length)); out.classList.toggle('has-warning', /△/.test(text)); }
       }, 400);
     }
     const run = () => {
       if (showing === 'goal' && EXAM) { preview.srcdoc = goalPicture(a); return; }
       const s = showing === 'goal' ? a.solution : current();
-      preview.srcdoc = Checker.compose(s.html, s.css, s.js, EX ? startOf(a, preview.contentWindow) : undefined);
+      preview.srcdoc = Checker.compose(s.html, s.css, s.js, pageOpts(a, preview.contentWindow, $('#answersIn') ? splitAnswers($('#answersIn').value) : null));
     };
     const keep = debounce(() => { if ((!EXAM || examLive()) && !(SW && result(id))) { state.run.drafts[id] = current(); save(); } if (showing === 'mine') run(); }, 450);
     for (const f of Object.keys(FILES)) { ed[f]._keep = keep; ed[f].on('change', keep); }
@@ -311,13 +341,15 @@
     view.querySelectorAll('[data-show]').forEach(b => b.addEventListener('click', () => {
       showing = b.dataset.show;
       view.querySelectorAll('[data-show]').forEach(x => x.classList.toggle('on', x === b));
-      $('#liveNote').textContent = showing === 'goal' ? (EXAM ? 'A picture of the finished app' : EX ? 'The finished server: try its routes' : 'This is what you are aiming for') : EX ? 'Restarts as you type' : 'Updates as you type';
+      $('#liveNote').textContent = showing === 'goal' ? (EXAM ? 'A picture of the finished app' : EX ? 'The finished server: try its routes' : CON ? 'The console of the finished program' : 'This is what you are aiming for') : EX ? 'Restarts as you type' : CON ? 'Console · runs as you type' : 'Updates as you type';
       run();
     }));
     view.querySelectorAll('[data-size]').forEach(b => b.addEventListener('click', () => {
       view.querySelectorAll('[data-size]').forEach(x => x.classList.toggle('on', x === b));
       $('#frameWrap').classList.toggle('phone', b.dataset.size === 'phone');
     }));
+    if ($('#answersIn')) $('#answersIn').addEventListener('input', debounce(() => run(), 450));
+    if ($('#rerunBtn')) $('#rerunBtn').addEventListener('click', () => run());
     $('#resetBtn').addEventListener('click', () => {
       if ((EXAM && !examLive()) || (SW && result(id))) return;
       if (!confirm(`Replace your code with the starter code for this ${WORD.toLowerCase()}?`)) return;
@@ -368,6 +400,29 @@
     if (result(id)) report(a, result(id), false);
   }
 
+  function quizBlock(a) {
+    const Q = quizOf(a); if (!Q.length) return '';
+    const p = picksOf(a.id);
+    return `<section class="quiz" aria-labelledby="quizH${a.id}">
+      <h2 id="quizH${a.id}">Check your understanding <span class="muted">${Q.length} question${Q.length > 1 ? 's' : ''} · 1 point each</span></h2>
+      <ol class="quiz-list">${Q.map((q, i) => `<li><p class="quiz-q" id="q${a.id}-${i}">${md(q.q)}</p>${q.code ? `<pre class="quiz-code">${esc(q.code)}</pre>` : ''}
+        <div role="radiogroup" aria-labelledby="q${a.id}-${i}">${q.options.map((o, k) => `<label class="quiz-opt"><input type="radio" name="q${a.id}-${i}" value="${k}" data-q="${i}"${p[i] === k ? ' checked' : ''}><span>${md(o)}</span></label>`).join('')}</div></li>`).join('')}</ol>
+    </section>`;
+  }
+  function quizReport(a, r) {
+    const Q = quizOf(a); if (!Q.length || !r.quiz) return '';
+    const n = r.quiz.ok.filter(Boolean).length;
+    return `<h3 class="${n === Q.length ? '' : 'bad-h'}">Check your understanding: ${n} of ${Q.length}</h3>
+      <ol class="results quiz-results">${Q.map((q, i) => { const pick = r.quiz.picked[i], ok = r.quiz.ok[i]; return `
+        <li class="${ok ? 'pass' : 'fail'}">
+          <p class="r-title">${ok ? '✓' : '✗'} ${md(q.q)} <span class="pts">${ok ? 1 : 0} / 1</span></p>
+          ${q.code ? `<pre class="quiz-code">${esc(q.code)}</pre>` : ''}
+          <p class="found"><strong>Your answer:</strong> ${pick == null ? 'not answered' : md(q.options[pick])}</p>
+          ${ok ? '' : `<p class="found"><strong>Correct answer:</strong> ${md(q.options[q.answer])}</p>`}
+          <p class="why"><strong>Why:</strong> ${md(q.explain)}</p>
+        </li>`; }).join('')}</ol>`;
+  }
+
   async function submit(a) {
     const btn = $('#submitBtn');
     btn.disabled = true; btn.textContent = 'Checking…';
@@ -376,6 +431,14 @@
     const prev = result(a.id);
     const r = { score: g.score, earned: g.earned, total: g.total, at: new Date().toISOString(), attempts: (prev ? prev.attempts : 0) + 1,
                 files, passed: g.results.map(x => x.ok), found: g.results.map(x => x.found), lint: g.lint.concat(g.tips || []) };
+    const Q = quizOf(a);
+    if (Q.length) {                                  // the quiz counts 1 point per question, added to the code's points
+      const p = picksOf(a.id), ok = Q.map((q, i) => p[i] === q.answer);
+      r.quiz = { picked: Q.map((q, i) => p[i] == null ? null : p[i]), ok };
+      r.code = { earned: g.earned, total: g.total };
+      r.earned = g.earned + ok.filter(Boolean).length; r.total = g.total + Q.length;
+      r.score = Math.round(100 * r.earned / r.total);
+    }
     if (g.run) { lastRuns[a.id] = g.run; r.output = { out: g.run.out.slice(0, 6000), err: g.run.err.slice(0, 1500), error: g.run.error, line: g.run.line, nfigs: g.run.figs.length }; }
     state.run.results[a.id] = r; save();
     btn.disabled = false; btn.textContent = 'Submit again';
@@ -410,7 +473,9 @@
           <p class="why"><strong>Why:</strong> ${md(x.c.explain)}</p>
           <p class="fix-label">The correct code:</p>
           <pre class="fix">${esc(x.c.fix)}</pre>
-        </li>`).join('')}</ol>` : '<p class="all-good">✓ Every check passed. Nicely done!</p>'}
+        </li>`).join('')}</ol>` : `<p class="all-good">✓ Every ${quizOf(a).length ? 'code ' : ''}check passed. Nicely done!</p>`}
+
+      ${quizReport(a, r)}
 
       ${r.lint && r.lint.length ? `<div class="lint"><strong>Also worth a look in your code (not scored):</strong><ul>${r.lint.map(n => `<li>${md(n)}</li>`).join('')}</ul></div>` : ''}
 
@@ -419,6 +484,7 @@
 
       <h3>Compare your ${kind(a.edit)} with the proper code</h3>
       <p class="muted legend"><span class="ln del">red</span> lines in yours are different or extra · <span class="ln add">green</span> lines in the proper code are the ones you were missing or wrote differently.</p>
+      ${semicolonNote(d, a.edit)}
       <div class="compare">
         <div><h4>Your code</h4>${codeLines(d.left)}</div>
         <div><h4>Proper code</h4>${codeLines(d.right)}</div>
@@ -428,8 +494,8 @@
       <div class="compare">
         ${PY ? `<div><h4>Your output</h4><div class="py-out small" id="mineOut">${pyOutput(lastRuns[a.id] || r.output || { out: '' })}</div></div>
         <div><h4>Goal output</h4><div class="py-out small" id="goalOut"><p class="py-empty">Running the proper code…</p></div></div>`
-        : `<div><h4>${EX ? 'Your server' : 'Your page'}</h4><div class="mini-frame"><iframe title="Your submitted page" id="mineFrame"></iframe></div></div>
-        <div><h4>Goal</h4><div class="mini-frame"><iframe title="The goal page" id="goalFrame"></iframe></div></div>`}
+        : `<div><h4>${EX ? 'Your server' : CON ? 'Your console' : 'Your page'}</h4><div class="mini-frame${CON ? ' console-view' : ''}"><iframe title="Your submitted page" id="mineFrame"></iframe></div></div>
+        <div><h4>${CON ? 'Goal console' : 'Goal'}</h4><div class="mini-frame${CON ? ' console-view' : ''}"><iframe title="The goal page" id="goalFrame"></iframe></div></div>`}
       </div>
 
       <div class="report-actions">
@@ -438,8 +504,8 @@
       </div>`;
     if (PY) goalRun(a).then(g => { const el = $('#goalOut'); if (el) el.innerHTML = pyOutput(g); });
     else {
-      $('#mineFrame').srcdoc = Checker.compose(files.html, files.css, files.js, EX ? startOf(a) : undefined);
-      $('#goalFrame').srcdoc = Checker.compose(a.solution.html, a.solution.css, a.solution.js, EX ? startOf(a) : undefined);
+      $('#mineFrame').srcdoc = Checker.compose(files.html, files.css, files.js, pageOpts(a));
+      $('#goalFrame').srcdoc = Checker.compose(a.solution.html, a.solution.css, a.solution.js, pageOpts(a));
     }
     $('#retryBtn').addEventListener('click', () => { window.scrollTo({ top: 0, behavior: 'smooth' }); editors()[a.edit].focus(); });
     if (focus) { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); el.focus({ preventScroll: true }); }
@@ -846,19 +912,20 @@
         </li>`).join('')}</ol>
       <h3>Your code${t.length ? ` (trial ${fbN})` : ''} and the proper code</h3>
       <p class="muted legend"><span class="ln del">red</span> lines in yours are different or extra · <span class="ln add">green</span> lines in the proper code are the ones you were missing or wrote differently.</p>
+      ${semicolonNote(d, a.edit)}
       <div class="compare">
         <div><h4>Your code</h4>${codeLines(d.left)}</div>
         <div><h4>Proper code</h4>${codeLines(d.right)}</div>
       </div>
       <h3>Compare the results</h3>
       <div class="compare">
-        <div><h4>${EX ? 'Your server' : 'Your page'}</h4><div class="mini-frame"><iframe title="Your code" id="mineFrame"></iframe></div></div>
-        <div><h4>Proper ${EX ? 'server' : 'page'}</h4><div class="mini-frame"><iframe title="The proper code" id="goalFrame"></iframe></div></div>
+        <div><h4>${EX ? 'Your server' : CON ? 'Your console' : 'Your page'}</h4><div class="mini-frame${CON ? ' console-view' : ''}"><iframe title="Your code" id="mineFrame"></iframe></div></div>
+        <div><h4>Proper ${EX ? 'server' : CON ? 'console' : 'page'}</h4><div class="mini-frame${CON ? ' console-view' : ''}"><iframe title="The proper code" id="goalFrame"></iframe></div></div>
       </div>`}
       <div class="report-actions">${a.id < N ? `<a class="btn primary big" href="#/activity/${a.id + 1}">Next: ${WORD} ${a.id + 1} →</a>` : `<a class="btn primary big" href="#/summary">See my results and get the report →</a>`}</div>`;
     if (fb && !PY) {
-      $('#mineFrame').srcdoc = Checker.compose(fbFiles.html, fbFiles.css, fbFiles.js, EX ? startOf(a) : undefined);
-      $('#goalFrame').srcdoc = Checker.compose(a.solution.html, a.solution.css, a.solution.js, EX ? startOf(a) : undefined);
+      $('#mineFrame').srcdoc = Checker.compose(fbFiles.html, fbFiles.css, fbFiles.js, pageOpts(a));
+      $('#goalFrame').srcdoc = Checker.compose(a.solution.html, a.solution.css, a.solution.js, pageOpts(a));
     }
     if (focus) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }

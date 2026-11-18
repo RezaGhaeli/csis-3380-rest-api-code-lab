@@ -1,5 +1,6 @@
 /*
-   REST API Code Lab: Movie Night API. Eight steps build one Express 5 REST API (server.js, CommonJS).
+   REST API Code Lab: Movie Night API. Part 1 (steps 1–8) builds an Express 5 REST API on an in-memory array;
+   Part 2 (steps 9–15) moves it to MongoDB with Mongoose (the lab's Mongoose look-alike, seeded from LAB.mongo).
    A stepwise lab (LAB.exam.tries = 4): the proper code, the starters of steps 2–8 and the fixes are NOT
    in this file. They are in the answer key (kept outside this folder) and reach the app encoded in
    js/keypack.js (scripts/pack_key.js), one step at a time.
@@ -79,6 +80,29 @@ const mine404 = r => r.status === 404 && !expressOwn(r);
 const own = r => found(r) + (expressOwn(r) ? '  (this is Express\'s own page: no route of yours answered)' : '');
 const hasMessage = r => json(r) && r.json && typeof r.json === 'object' && typeof r.json.message === 'string' && r.json.message.trim() !== '';
 const NEW = { title: 'Wallace & Gromit: Vengeance Most Fowl', year: 2024, genre: 'animation' };
+
+/* ---------------------------------------------------------------- helpers for Part 2 (MongoDB): the lab's Mongoose
+   look-alike keeps its state in c.server.mongo (connections, models, the in-memory database) */
+const NEWM = { title: 'Wallace & Gromit: Vengeance Most Fowl', year: 2024, genre: 'animation', rating: 8 };
+const mongo = c => (c.server && c.server.mongo) || { connects: [], models: {}, connected: false };
+const models = c => mongo(c).models || {};
+const errMsg = r => (r.json && r.json.error && typeof r.json.error.message === 'string' && r.json.error.message) || (r.json && typeof r.json.message === 'string' && r.json.message) || '';
+const count = async c => { const r = await c.get('/movies'); return Array.isArray(r.json) ? r.json.length : -1; };
+const SEED_IDS = { 'Spirited Away': '665f1c010000000000000001', 'The Princess Bride': '665f1c010000000000000002', 'Inception': '665f1c010000000000000003',
+  'Hidden Figures': '665f1c010000000000000004', 'Paddington 2': '665f1c010000000000000005', 'Arrival': '665f1c010000000000000006', 'Coco': '665f1c010000000000000007' };
+const idOf = async (c, title) => { const r = await c.get('/movies'); const m = Array.isArray(r.json) && r.json.find(x => x && x.title === title); return (m && m._id) || SEED_IDS[title]; };
+/* save a movie straight through the student's Movie model: the error it throws, or null (keep: the saved document) */
+const tryCreate = async (c, data, keep) => {
+  await c.get('/');
+  const M = models(c).Movie;
+  if (!M || !mongo(c).connected) return undefined;
+  try {
+    const d = await M.create(data);
+    const copy = JSON.parse(JSON.stringify(d));
+    await M.deleteOne({ _id: copy._id });
+    return keep ? copy : null;
+  } catch (e) { return keep ? undefined : e; }
+};
 
 const ACTIVITIES = [
   /* ------------------------------------------------------------------ 1 */
@@ -390,6 +414,286 @@ const ACTIVITIES = [
     tips: [
       c => { const l = c.code.js.search(/app\s*\.\s*listen\s*\(/), u = c.code.js.lastIndexOf('app.use('); return l >= 0 && u > l ? 'It works, but keep the 404 middleware and the error handler just **above** `app.listen()`, so the file reads in the order Express runs it.' : null; }
     ]
+  },
+  /* ================================================================== PART 2: MongoDB and Mongoose */
+
+  /* ------------------------------------------------------------------ 9 */
+  {
+    id: 9,
+    module: 'Step 9',
+    topic: 'dotenv, mongoose.connect',
+    edit: 'js',
+    start: '/',
+    title: 'Part 2 begins: connect to MongoDB, then listen',
+    art: 'img/a9.png',
+    story: 'Part 2: the movies move from the `movieList` array into **MongoDB**. This lab gives you a MongoDB database that already holds the 7 movies (in the collection `movies`) and a `.env` file with `MONGODB_URI`, so there is nothing to install. `server.js` starts again from a short file. First job, as in the tutorial: load the secret, **connect**, and only then **listen**.',
+    steps: [
+      { text: 'At `// Step 9a`, the very top of the file, load `dotenv` first (so `process.env.MONGODB_URI` exists), then `mongoose`:', code: "require('dotenv').config({ quiet: true });\nconst express = require('express');\nconst mongoose = require('mongoose');" },
+      'At `// Step 9b`, write an `async function start()` that `await`s `mongoose.connect(process.env.MONGODB_URI)`, logs **Connected to MongoDB**, and **then** calls `app.listen(...)`. Wrap it in `try`/`catch`: on failure log the error message.',
+      'Call `start()` at the end of the file. Test **GET `/`** and read the terminal under the panel: "Connected to MongoDB" comes before the "listening" line.'
+    ],
+    practise: ['dotenv', 'process.env', 'mongoose.connect', 'async / await'],
+    starter: { js: null },
+    solution: { js: null },
+    checks: [
+      { text: 'The server runs: `GET /` answers **200** with the JSON welcome message', pts: 2,
+        test: async c => { const r = await c.get('/'); return c.ok(r.status === 200 && hasMessage(r), found(r)); },
+        explain: 'Until something calls `app.listen()`, the API does not answer at all. In this step `listen` is called inside `start()`, after the connection succeeds.' },
+      { text: 'It connects to the database in `.env` (`process.env.MONGODB_URI`)', pts: 1,
+        test: async c => { await c.get('/'); const m = mongo(c); const uri = (LAB.mongo && LAB.mongo.env || {}).MONGODB_URI;
+          return c.ok(m.connects.includes(uri), m.connects.length ? 'connected to ' + m.connects.map(u => u.replace(/\/\/[^@]*@/, '//…@')).join(', ') : 'mongoose.connect() was never called'); },
+        explain: 'The connection string holds a password, so it lives in `.env`, never in the code. `dotenv` copies it into `process.env.MONGODB_URI`; that is why `require(\'dotenv\').config()` must run before anything uses it.' },
+      { text: 'It **connects first, then listens** (`app.listen` runs after `await mongoose.connect`)', pts: 1,
+        test: async c => { await c.get('/'); const m = mongo(c); return c.ok(m.connects.length > 0 && m.connected && !m.listenedBeforeConnect, !m.connects.length ? 'mongoose.connect() was never called' : m.listenedBeforeConnect ? 'app.listen() ran before the connection was ready' : 'listening after the connection'); },
+        explain: 'An API that cannot reach its database should not accept requests. `await` pauses `start()` until `mongoose.connect()` has finished; only then does `app.listen()` run. If the connection fails, the `catch` runs and the server never pretends to work.' },
+      { text: 'The terminal shows a "connected" message', pts: 1,
+        test: async c => { await c.get('/'); const t = (c.logs || []).join('\n'); return c.ok(/connect/i.test(t), t ? 'terminal: ' + t.replace(/\s+/g, ' ').slice(0, 90) : 'nothing in the terminal'); },
+        explain: 'A log line on startup tells you at a glance that the database is reachable, which saves a lot of guessing when something else goes wrong.' }
+    ],
+    tips: [
+      c => /mongodb(\+srv)?:\/\//.test(c.code.js) ? 'Do not write the connection string in `server.js`: it contains a password. Read it from `process.env.MONGODB_URI`.' : null
+    ]
+  },
+
+  /* ------------------------------------------------------------------ 10 */
+  {
+    id: 10,
+    module: 'Step 10',
+    topic: 'Schema, model, find()',
+    edit: 'js',
+    start: '/movies',
+    title: 'The Movie schema and model, and GET /movies',
+    art: 'img/a10.png',
+    story: 'MongoDB accepts any document; **Mongoose** lets us say what a movie must look like. From the **schema** we make a **model**, `Movie`, which reads and writes the `movies` collection. Then `GET /movies` can ask MongoDB for every movie with `Movie.find()`.',
+    steps: [
+      { text: 'At `// Step 10a`, define the schema and the model (the model name `Movie` becomes the collection `movies`):', code: "const movieSchema = new mongoose.Schema(\n  {\n    title: { type: String, required: true, trim: true },\n    year: { type: Number, required: true, min: 1888 },\n    genre: { type: String, required: true, lowercase: true, trim: true },\n    rating: { type: Number, min: 0, max: 10 }\n  },\n  { timestamps: true }\n);\nconst Movie = mongoose.model('Movie', movieSchema);" },
+      'At `// Step 10b`, add **`GET /movies`**: `await Movie.find()` and send the result with `res.json(...)`.',
+      'Sort the movies from the oldest to the newest year: `Movie.find().sort({ year: 1 })`.',
+      'Test **GET `/movies`**: 7 movies, each with an `_id` that MongoDB created.'
+    ],
+    practise: ['mongoose.Schema', 'mongoose.model', 'find()', 'sort()'],
+    starter: { js: null },
+    solution: { js: null },
+    checks: [
+      { text: '`GET /movies` answers **200** with the **7** movies from MongoDB (each with an `_id`)', pts: 2,
+        test: async c => { const r = await c.get('/movies'); const ok = isArr(r) && r.json.length === 7 && r.json.every(m => isMovie(m) && /^[0-9a-f]{24}$/.test(m._id));
+          return c.ok(r.status === 200 && ok, isArr(r) ? r.json.length + ' movie(s)' + (r.json[0] && !r.json[0]._id ? ' without _id (not from MongoDB?)' : '') : found(r) + (/circular structure/i.test(r.text || '') ? '  (res.json got a Query: is an await missing?)' : '')); },
+        explain: '`Movie.find()` returns a **query**, which runs when you `await` it and gives an array of documents. Without `await`, `res.json()` receives the query object itself and fails. Every document has an `_id`, an ObjectId that MongoDB created.' },
+      { text: 'The movies are sorted by year, oldest first', pts: 1,
+        test: async c => { const r = await c.get('/movies'); const y = isArr(r) ? r.json.map(m => m.year) : [];
+          return c.ok(y.length > 1 && y.every((v, i) => i === 0 || y[i - 1] <= v), y.length ? 'years: ' + y.join(', ') : found(r)); },
+        explain: '`.sort({ year: 1 })` asks MongoDB to sort: `1` is ascending, `-1` descending. The database does the work, not your JavaScript.' },
+      { text: 'A model called `Movie` exists, so the collection is `movies`', pts: 1,
+        test: async c => { await c.get('/'); const M = models(c).Movie; return c.ok(!!M && M.collection.name === 'movies', Object.keys(models(c)).length ? 'models: ' + Object.keys(models(c)).join(', ') : 'no model yet'); },
+        explain: 'Mongoose turns the model name into the collection name: lower case and plural, so `Movie` reads and writes `movies`. A different name would point at an empty collection.' },
+      { text: 'Schema rules: a movie without a **title**, **year** or **genre** is refused', pts: 1,
+        test: async c => { const e = await tryCreate(c, { rating: 5 }); const keys = e && e.errors ? Object.keys(e.errors) : [];
+          return c.ok(['title', 'year', 'genre'].every(k => keys.includes(k)), e === null ? 'the empty movie was saved' : e && e.name ? e.name + (keys.length ? ' for: ' + keys.join(', ') : ': ' + e.message) : 'no Movie model'); },
+        explain: '`required: true` makes Mongoose refuse to save a document without that field, with a `ValidationError` that lists every problem.' },
+      { text: 'Schema rules: `year` must be at least **1888** and `rating` between **0 and 10**', pts: 1,
+        test: async c => { const a = await tryCreate(c, { title: 'Old', year: 1500, genre: 'drama' }); const b = await tryCreate(c, { title: 'Wow', year: 2000, genre: 'drama', rating: 11 });
+          const ok = a && a.errors && a.errors.year && b && b.errors && b.errors.rating;
+          return c.ok(!!ok, !(a && a.errors && a.errors.year) ? 'year 1500 was accepted' : 'rating 11 was accepted'); },
+        explain: '`min` and `max` check numbers before saving. 1888 is the year of the oldest surviving film, so an earlier year must be a typing mistake.' },
+      { text: 'Schema options: `genre` is stored in lower case, `title` trimmed, with `createdAt` / `updatedAt`', pts: 1,
+        test: async c => { const d = await tryCreate(c, { title: '  Trim Me  ', year: 2001, genre: 'DRAMA' }, true);
+          return c.ok(!!d && d.title === 'Trim Me' && d.genre === 'drama' && !!d.createdAt && !!d.updatedAt, d && d.title !== undefined ? 'saved as title "' + d.title + '", genre "' + d.genre + '"' + (d.createdAt ? '' : ', no createdAt') : 'could not save a valid movie'); },
+        explain: '`trim`, `lowercase` and `{ timestamps: true }` let Mongoose clean the data and record when each document was created and changed, without any code in the routes.' }
+    ],
+    tips: []
+  },
+
+  /* ------------------------------------------------------------------ 11 */
+  {
+    id: 11,
+    module: 'Step 11',
+    topic: 'findById, a filter',
+    edit: 'js',
+    start: '/movies?genre=comedy',
+    title: 'GET /movies/:id with findById, and ?genre= as a MongoDB filter',
+    art: 'img/a11.png',
+    story: 'Now one movie by its `_id`, and the genre buttons again. In Part 1 you filtered the array yourself; now MongoDB does it: `Movie.find({ genre: \'comedy\' })` is the same filter you would type in mongosh.',
+    steps: [
+      'At `// Step 11a`, add **`GET /movies/:id`**: `await Movie.findById(req.params.id)`. It gives `null` when no movie has that id: then send **404** and a JSON `message`.',
+      'At `// Step 11b`, change `GET /movies`: build a `filter` object; if `req.query.genre` has a value, set `filter.genre` to it; pass it to `Movie.find(filter)` (keep the sort). `?genre=Comedy` works too: the schema\'s `lowercase: true` also lower-cases values in queries.',
+      'Test: copy an `_id` from `/movies` and open `/movies/<that id>`; change one character of it (404); try `/movies?genre=Comedy` (2 movies) and `/movies` (still 7).'
+    ],
+    practise: ['findById', 'null', 'find(filter)', 'req.query'],
+    starter: { js: null },
+    solution: { js: null },
+    checks: [
+      { text: '`GET /movies/<id of Inception>` answers **200** with that movie', pts: 2,
+        test: async c => { const id = await idOf(c, 'Inception'); const r = await c.get('/movies/' + (id || '665f1c010000000000000003'));
+          return c.ok(r.status === 200 && isMovie(r.json) && r.json.title === 'Inception', found(r)); },
+        explain: '`findById(id)` looks for the document whose `_id` equals the id from the URL. Mongoose turns the 24-character string into an ObjectId for you.' },
+      { text: 'A valid id that is not in the collection answers **404** with a JSON `message`', pts: 1,
+        test: async c => { const r = await c.get('/movies/665f1c0100000000000000ff'); return c.ok(mine404(r) && hasMessage(r), own(r)); },
+        explain: 'When nothing matches, `findById` resolves to `null` (it does not throw). Checking `if (!movie)` turns that into a clear 404 instead of an empty 200.' },
+      { text: '`/movies?genre=Comedy` sends only the **2** comedies', pts: 1,
+        test: async c => { const r = await c.get('/movies?genre=Comedy'); const t = isArr(r) ? r.json.map(m => m.title) : [];
+          return c.ok(t.length === 2 && t.includes('The Princess Bride') && t.includes('Paddington 2'), isArr(r) ? t.length + ' movie(s): ' + t.join(', ') : found(r)); },
+        explain: 'The object you pass to `find()` is a **filter**: only documents whose fields match are returned. Mongoose casts the filter with the schema, so `lowercase: true` turns "Comedy" into "comedy" before MongoDB compares.' },
+      { text: 'Without `?genre=`, `/movies` still sends all 7, sorted by year', pts: 1,
+        test: async c => { const f = await c.get('/movies?genre=comedy'); const filtered = isArr(f) && f.json.length === 2; const r = await c.get('/movies');
+          const y = isArr(r) ? r.json.map(m => m.year) : [];
+          return c.ok(filtered && y.length === 7 && y.every((v, i) => i === 0 || y[i - 1] <= v), !filtered ? 'the genre filter is not working yet' : isArr(r) ? y.length + ' movie(s)' : found(r)); },
+        explain: 'An empty filter `{}` matches every document, so the same route serves both cases.' }
+    ],
+    tips: []
+  },
+
+  /* ------------------------------------------------------------------ 12 */
+  {
+    id: 12,
+    module: 'Step 12',
+    topic: 'create()',
+    edit: 'js',
+    start: '/movies',
+    title: 'POST /movies with Movie.create()',
+    art: 'img/a12.png',
+    story: 'Adding a movie is now one line: `Movie.create()` checks the schema, saves the document, and gives it back with its new `_id`. The rules you wrote in Step 10 protect the database from bad data.',
+    steps: [
+      'At `// Step 12`, add **`POST /movies`**. Take `title`, `year`, `genre` and `rating` from `req.body` (only those four).',
+      '`await Movie.create({ title, year, genre, rating })` and send the result with status **201**.',
+      'Test: **POST `/movies`** with `{ "title": "  Wallace & Gromit ", "year": 2024, "genre": "Animation" }`: look at how the title and genre were saved. Then try a body without a title: what does the client get? (Step 15 makes it a proper 400.)'
+    ],
+    practise: ['Model.create', '201', 'ValidationError'],
+    starter: { js: null },
+    solution: { js: null },
+    checks: [
+      { text: 'A valid **POST `/movies`** answers **201 Created**', pts: 2,
+        test: async c => { const r = await c.send('POST', '/movies', NEWM); return c.ok(r.status === 201, found(r)); },
+        explain: '`Movie.create()` returns a Promise of the saved document; `await` it, then answer 201, the status for "a new resource was made".' },
+      { text: 'The reply is the saved movie: an `_id`, the title trimmed, the genre in lower case, and `createdAt`', pts: 1,
+        test: async c => { const r = await c.send('POST', '/movies', { title: '  Wallace & Gromit ', year: 2024, genre: 'Animation' }); const m = r.json || {};
+          return c.ok(r.status === 201 && /^[0-9a-f]{24}$/.test(m._id || '') && m.title === 'Wallace & Gromit' && m.genre === 'animation' && !!m.createdAt, found(r)); },
+        explain: 'What `create()` gives back is the document **as saved**, after the schema cleaned it. Sending it back tells the client its new `_id`.' },
+      { text: 'It is really saved: `GET /movies` has one more movie, and `GET /movies/<new _id>` finds it', pts: 1,
+        test: async c => { const before = await count(c); const p = await c.send('POST', '/movies', NEWM); const id = p.json && p.json._id;
+          const after = await count(c); const one = id ? await c.get('/movies/' + id) : null;
+          return c.ok(p.status === 201 && after === before + 1 && one && one.status === 200, p.status !== 201 ? found(p) : before + ' movie(s) before, ' + after + ' after' + (one ? '; ' + found(one) : '')); },
+        explain: 'The database, not the server, remembers the movie, so every later request (and a restart) still sees it.' },
+      { text: 'A movie **without a title** is not saved', pts: 1,
+        test: async c => { const before = await count(c); const p = await c.send('POST', '/movies', { year: 2020, genre: 'drama' }); const after = await count(c);
+          return c.ok(p.status >= 400 && !expressOwn(p) && after === before, expressOwn(p) ? own(p) : p.status < 400 ? found(p) : before + ' movie(s) before, ' + after + ' after'); },
+        explain: '`create()` validates first. A `ValidationError` rejects the Promise, so the route stops at `await` and nothing is saved. Until Step 15, Express answers that with a 500 HTML page.' }
+    ],
+    tips: [
+      c => /create\s*\(\s*req\.body\s*\)/.test(c.code.js) ? 'It works, but pick the fields you accept (`const { title, year, genre, rating } = req.body`) instead of passing the whole body: a client cannot slip in fields you did not plan for.' : null
+    ]
+  },
+
+  /* ------------------------------------------------------------------ 13 */
+  {
+    id: 13,
+    module: 'Step 13',
+    topic: 'findByIdAndUpdate',
+    edit: 'js',
+    start: '/movies',
+    title: 'PUT /movies/:id with findByIdAndUpdate',
+    art: 'img/a13.png',
+    story: '`findByIdAndUpdate(id, changes, options)` finds a movie, applies the changes and saves it in one call. Two options matter: send back the movie **after** the change, and **run the schema rules** on updates too.',
+    steps: [
+      { text: 'At `// Step 13`, add **`PUT /movies/:id`**. Take the four fields from `req.body` and update:', code: "const movie = await Movie.findByIdAndUpdate(\n  req.params.id,\n  { title, year, genre, rating },\n  { returnDocument: 'after', runValidators: true }\n);" },
+      'If `movie` is `null`, send **404** and a JSON `message`; otherwise send the updated movie (status 200).',
+      'Test: **PUT** the Princess Bride\'s `_id` with `{ "genre": "Fantasy", "rating": 9 }`: only those fields change, and `updatedAt` moves. Then try `{ "rating": 20 }`.'
+    ],
+    practise: ['findByIdAndUpdate', 'returnDocument', 'runValidators'],
+    starter: { js: null },
+    solution: { js: null },
+    checks: [
+      { text: 'A valid **PUT** answers **200** with the movie **after** the change', pts: 2,
+        test: async c => { const id = await idOf(c, 'The Princess Bride'); const r = await c.send('PUT', '/movies/' + id, { genre: 'Fantasy', rating: 9 });
+          return c.ok(r.status === 200 && isMovie(r.json) && r.json.genre === 'fantasy' && r.json.rating === 9, found(r) + (r.status === 200 && r.json && r.json.genre === 'comedy' ? '  (this is the movie BEFORE the change: returnDocument: \'after\' is missing)' : '')); },
+        explain: 'By default Mongoose returns the document as it was **before** the update. `returnDocument: \'after\'` returns the new version, which is what a client expects. (Older code writes `new: true`, which Mongoose 9 has deprecated.)' },
+      { text: 'Only the fields you send change; the change is saved', pts: 1,
+        test: async c => { const id = await idOf(c, 'Coco'); await c.send('PUT', '/movies/' + id, { rating: 9.1 }); const g = await c.get('/movies/' + id);
+          return c.ok(g.status === 200 && g.json && g.json.rating === 9.1 && g.json.title === 'Coco' && g.json.year === 2017, found(g)); },
+        explain: 'Fields you leave out of the body are `undefined`, and Mongoose skips them, so a PUT with `{ rating }` changes only the rating.' },
+      { text: 'A valid id that does not exist answers **404**', pts: 1,
+        test: async c => { const r = await c.send('PUT', '/movies/665f1c0100000000000000ff', { rating: 5 }); return c.ok(mine404(r), own(r)); },
+        explain: '`findByIdAndUpdate` resolves to `null` when there is no such document, just like `findById`.' },
+      { text: 'The schema rules apply to updates: `{ "rating": 20 }` is **not** saved', pts: 1,
+        test: async c => { const id = await idOf(c, 'Arrival'); const p = await c.send('PUT', '/movies/' + id, { rating: 20 }); const g = await c.get('/movies/' + id);
+          return c.ok(g.json && g.json.rating !== 20 && p.status >= 400 && !expressOwn(p), g.json && g.json.rating === 20 ? 'rating 20 was saved: runValidators is missing' : own(p)); },
+        explain: 'Updates skip the schema rules unless you ask for them with `runValidators: true`. Without it, `min` and `max` are not checked and bad data reaches the database.' }
+    ],
+    tips: [
+      c => /new\s*:\s*true/.test(c.code.js) ? '`new: true` still works but Mongoose 9 warns that it is deprecated: write `returnDocument: \'after\'`.' : null
+    ]
+  },
+
+  /* ------------------------------------------------------------------ 14 */
+  {
+    id: 14,
+    module: 'Step 14',
+    topic: 'findByIdAndDelete',
+    edit: 'js',
+    start: '/movies',
+    title: 'DELETE /movies/:id with findByIdAndDelete',
+    art: 'img/a14.png',
+    story: 'Last of the CRUD routes. `findByIdAndDelete` removes the movie and gives back what it removed, or `null` if there was nothing to remove.',
+    steps: [
+      'At `// Step 14`, add **`DELETE /movies/:id`**: `await Movie.findByIdAndDelete(req.params.id)`.',
+      'If the result is `null`, answer **404** with a JSON `message`; otherwise **204** with `res.status(204).end()`.',
+      'Test: delete one movie (204), then send the same request again (404).'
+    ],
+    practise: ['findByIdAndDelete', '204', '404'],
+    starter: { js: null },
+    solution: { js: null },
+    checks: [
+      { text: '**DELETE** an existing movie answers **204 No Content**', pts: 2,
+        test: async c => { const id = await idOf(c, 'Hidden Figures'); const r = await c.send('DELETE', '/movies/' + id); return c.ok(r.status === 204, found(r)); },
+        explain: '204 says "done, and there is nothing to send back". The deleted document is in the result if you ever need it (for a log, or an undo).' },
+      { text: 'The movie is really gone: `GET` gives 404 and the list has one movie fewer', pts: 1,
+        test: async c => { const id = await idOf(c, 'Arrival'); const before = await count(c); const d = await c.send('DELETE', '/movies/' + id);
+          const one = await c.get('/movies/' + id); const after = await count(c);
+          return c.ok(d.status === 204 && one.status === 404 && after === before - 1, d.status !== 204 ? found(d) : one.status !== 404 ? found(one) : before + ' movie(s) before, ' + after + ' after'); },
+        explain: 'Once deleted, `findById` finds nothing, so your Step 11 route answers 404 for it.' },
+      { text: 'Deleting a movie that is not there answers **404**', pts: 1,
+        test: async c => { const r = await c.send('DELETE', '/movies/665f1c0100000000000000ff'); return c.ok(mine404(r) && hasMessage(r), own(r)); },
+        explain: '`findByIdAndDelete` resolves to `null` when there was nothing to delete: the client asked for something that does not exist.' }
+    ],
+    tips: []
+  },
+
+  /* ------------------------------------------------------------------ 15 */
+  {
+    id: 15,
+    module: 'Step 15',
+    topic: 'CastError, ValidationError',
+    edit: 'js',
+    start: '/movies/abc',
+    title: 'Mongoose errors in one place: 400s, a JSON 404',
+    art: 'img/a15.png',
+    story: 'Two Mongoose errors still reach the client as 500 HTML pages: a **CastError** (`/movies/abc` is not an ObjectId) and a **ValidationError** (data that breaks a schema rule). Both are the **client\'s** mistake, so they should be **400** with a JSON message. One error handler fixes every route at once.',
+    steps: [
+      'At `// Step 15a` (after all the routes), add the middleware that makes a 404 `Error(\'Not Found\')` and passes it on with `next(err)`, as in Part 1.',
+      { text: 'At `// Step 15b`, add the error handler (four parameters). Check `err.name` first:', code: "if (err.name === 'CastError') {\n  return res.status(400).json({ error: { message: 'That is not a valid movie id.' } });\n}\nif (err.name === 'ValidationError') {\n  return res.status(400).json({ error: { message: err.message } });\n}\nres.status(err.status || 500).json({ error: { message: err.message } });" },
+      'Test **GET `/movies/abc`**, a **POST** without a title, a **PUT** with `{ "rating": 20 }`, and **GET `/hello`**.'
+    ],
+    practise: ['error handler', 'err.name', 'CastError', 'ValidationError'],
+    starter: { js: null },
+    solution: { js: null },
+    checks: [
+      { text: '`GET /movies/abc` answers **400** with a JSON `error.message`', pts: 1,
+        test: async c => { const r = await c.get('/movies/abc'); return c.ok(r.status === 400 && errMsg(r) !== '', found(r)); },
+        explain: '`findById(\'abc\')` cannot even search: Mongoose throws a **CastError** because "abc" is not a 24-character ObjectId. Express 5 passes it to the error handler, which recognises it by `err.name`.' },
+      { text: 'A **POST** without a title answers **400**, and the message names the problem (`title`)', pts: 2,
+        test: async c => { const r = await c.send('POST', '/movies', { year: 2020, genre: 'drama' }); return c.ok(r.status === 400 && /title/i.test(errMsg(r)), found(r)); },
+        explain: 'A **ValidationError** lists every broken rule in `err.message` ("Movie validation failed: title: Path `title` is required."), so sending it back tells the client exactly what to fix.' },
+      { text: 'A **PUT** with `{ "rating": 20 }` answers **400**', pts: 1,
+        test: async c => { const id = await idOf(c, 'Spirited Away'); const r = await c.send('PUT', '/movies/' + id, { rating: 20 }); return c.ok(r.status === 400 && errMsg(r) !== '', found(r)); },
+        explain: 'With `runValidators: true`, an update that breaks a rule throws the same ValidationError, so the same handler covers it.' },
+      { text: 'An unknown URL answers **404** with `{ "error": { "message": "Not Found" } }`', pts: 1,
+        test: async c => { const r = await c.get('/hello'); return c.ok(mine404(r) && /not\s*found/i.test(errMsg(r)), own(r)); },
+        explain: 'The 404 middleware is reached only when no route answered; `next(err)` hands its error to the handler, so even "not found" comes back as JSON.' },
+      { text: 'The real routes still work (`/movies` 200 with every movie, a missing id still 404)', pts: 1,
+        test: async c => { const h = await c.get('/movies/abc'); const mine = h.status === 400; const r = await c.get('/movies'); const m = await c.get('/movies/665f1c0100000000000000ff');
+          return c.ok(mine && isArr(r) && r.json.length >= 5 && m.status === 404, !mine ? 'the error handler is not working yet' : !isArr(r) ? found(r) : found(m)); },
+        explain: 'The 404 middleware and the error handler must come **after** the routes: middleware runs in order, and a catch-all placed first would answer every request.' }
+    ],
+    tips: []
   }
 ];
 

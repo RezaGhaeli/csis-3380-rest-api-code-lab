@@ -240,6 +240,7 @@ const ExpressLab = (() => {
       app.listen = (...a) => {
         const cb = a.find(x => typeof x === 'function');
         server.app = app; server.port = typeof a[0] === 'number' || typeof a[0] === 'string' ? a[0] : 3000;
+        if (server.mongo && !server.mongo.connected) server.mongo.listenedBeforeConnect = true;   /* MongoDB labs: listen came first */
         const srv = { close(f) { if (server.app === app) server.app = null; if (f) f(); return srv; }, address() { return { port: +server.port || 3000, address: '::', family: 'IPv6' }; }, on() { return srv; }, once() { return srv; } };
         setTimeout(() => { try { if (cb) cb.call(srv); } catch (e) { report(e); } }, 0);
         return srv;
@@ -265,18 +266,350 @@ const ExpressLab = (() => {
       extname: p => (String(p).split('/').pop().match(/\.[^.]*$/) || [''])[0]
     };
     path.default = path;
-    const modules = { express, path };
+    /* ---------------------------------------------------------------- a Mongoose look-alike (MongoDB labs)
+       require('mongoose') gives Schema / model / connect with an in-memory database, seeded from LAB.mongo.seed
+       (window.__labMongoCfg). It mirrors Mongoose 9: casting, required / min / max / enum / minLength / maxLength /
+       trim / lowercase / default, timestamps, CastError for bad ids, ValidationError messages, thenable queries with
+       sort / limit / select, findByIdAndUpdate with returnDocument and runValidators. Real Mongoose's messages are
+       copied word for word, so the lab teaches the errors students will see. */
+    function mongooseLike() {
+      const cfg = W.__labMongoCfg || {};
+      const mongo = server.mongo = { connected: false, connects: [], listenedBeforeConnect: false, models: {}, db: {} };
+      const clone = x => x === undefined ? undefined : JSON.parse(JSON.stringify(x));
+      let counter = Math.floor(Math.random() * 0xffffff);
+      const hex = (n, w) => n.toString(16).padStart(w, '0').slice(-w);
+      const rand5 = hex(Math.floor(Math.random() * 0xffffffffff), 10);
+      const newId = () => hex(Math.floor(Date.now() / 1000), 8) + rand5 + hex(++counter, 6);
+      const isOid = v => typeof v === 'string' ? /^[0-9a-fA-F]{24}$/.test(v) : !!(v && v._isOid);
+      const now = () => new Date().toISOString();
+      for (const [coll, docs] of Object.entries(cfg.seed || {})) {
+        mongo.db[coll] = docs.map((d, i) => Object.assign({ _id: d._id || hex(0x665f1c00 + i, 8) + '0000000000' + hex(i + 1, 6) }, clone(d)));
+      }
+      const TYPES = { String: 'String', Number: 'Number', Boolean: 'Boolean', Date: 'Date', ObjectId: 'ObjectId', Mixed: 'Mixed' };
+      const typeName = t => t === String ? 'String' : t === Number ? 'Number' : t === Boolean ? 'Boolean' : t === Date ? 'Date'
+        : typeof t === 'string' ? (TYPES[t] || t) : t && t.schemaName ? t.schemaName : Array.isArray(t) ? 'Array' : 'Mixed';
+      const show = v => typeof v === 'string' ? '"' + v + '"' : JSON.stringify(v);
+      const typeOf = v => v === null ? 'null' : Array.isArray(v) ? 'Array' : typeof v;
+
+      class MongooseError extends Error { constructor(m) { super(m); this.name = 'MongooseError'; } }
+      class CastError extends MongooseError {
+        constructor(type, value, path, model) {
+          super('Cast to ' + type + ' failed for value ' + show(value) + ' (type ' + typeOf(value) + ') at path "' + path + '"' + (model ? ' for model "' + model + '"' : ''));
+          this.name = 'CastError'; this.kind = type; this.value = value; this.path = path;
+        }
+      }
+      class ValidatorError extends MongooseError { constructor(m, path, kind) { super(m); this.name = 'ValidatorError'; this.path = path; this.kind = kind; } }
+      class ValidationError extends MongooseError {
+        constructor(errors, model) {
+          const list = Object.values(errors).map(e => e.path + ': ' + e.message).join(', ');
+          super((model ? model + ' validation failed' : 'Validation failed') + ': ' + list);
+          this.name = 'ValidationError'; this.errors = errors; this._message = model ? model + ' validation failed' : 'Validation failed';
+          this._list = list;
+        }
+        toString() { return this.name + ': ' + this._list; }   /* String(err) leaves out "Movie validation failed", as Mongoose does */
+      }
+
+      function Schema(def, opts) {
+        if (!(this instanceof Schema)) return new Schema(def, opts);
+        this.options = Object.assign({ timestamps: false }, opts || {});
+        this.paths = {};
+        for (const [k, v] of Object.entries(def || {})) {
+          const p = v && typeof v === 'object' && !Array.isArray(v) && 'type' in v ? Object.assign({}, v) : { type: v };
+          p.instance = typeName(p.type);
+          this.paths[k] = p;
+        }
+      }
+      Schema.Types = { String: 'String', Number: 'Number', Boolean: 'Boolean', Date: 'Date', ObjectId: { schemaName: 'ObjectId' }, Mixed: 'Mixed' };
+
+      function castValue(p, path, v, model) {
+        if (v === null || v === undefined) return v;
+        const t = p.instance;
+        if (t === 'String') {
+          if (typeof v === 'object') throw new CastError('string', v, path, model);
+          let s = String(v);
+          if (p.trim) s = s.trim();
+          if (p.lowercase) s = s.toLowerCase();
+          if (p.uppercase) s = s.toUpperCase();
+          return s;
+        }
+        if (t === 'Number') {
+          if (typeof v === 'number') { if (isNaN(v)) throw new CastError('Number', v, path, model); return v; }
+          if (typeof v === 'string' && v.trim() !== '' && !isNaN(Number(v))) return Number(v);
+          if (typeof v === 'boolean') return v ? 1 : 0;
+          throw new CastError('Number', v, path, model);
+        }
+        if (t === 'Boolean') {
+          if (v === true || v === 'true' || v === 1 || v === '1' || v === 'yes') return true;
+          if (v === false || v === 'false' || v === 0 || v === '0' || v === 'no') return false;
+          { const e = new CastError('Boolean', v, path, model); e.message += ' because of "CastError"'; throw e; }
+        }
+        if (t === 'Date') { const d = new Date(v); if (isNaN(d)) throw new CastError('date', v, path, model); return d.toISOString(); }
+        if (t === 'ObjectId') { if (!isOid(v)) throw new CastError('ObjectId', v, path, model); return String(v); }
+        return v;
+      }
+      /* checks one path's value; returns an error message or null */
+      function check(p, path, v) {
+        const label = 'Path `' + path + '`';
+        if (p.required && (v === undefined || v === null || (p.instance === 'String' && v === ''))) return [label + ' is required.', 'required'];
+        if (v === undefined || v === null) return null;
+        if (p.min != null && v < (Array.isArray(p.min) ? p.min[0] : p.min)) return [label + ' (' + v + ') is less than minimum allowed value (' + (Array.isArray(p.min) ? p.min[0] : p.min) + ').', 'min'];
+        if (p.max != null && v > (Array.isArray(p.max) ? p.max[0] : p.max)) return [label + ' (' + v + ') is more than maximum allowed value (' + (Array.isArray(p.max) ? p.max[0] : p.max) + ').', 'max'];
+        const en = Array.isArray(p.enum) ? p.enum : p.enum && p.enum.values;
+        if (en && !en.includes(v)) return ['`' + v + '` is not a valid enum value for path `' + path + '`.', 'enum'];
+        if (p.minLength != null && String(v).length < p.minLength) return [label + ' (`' + v + '`, length ' + String(v).length + ') is shorter than the minimum allowed length (' + p.minLength + ').', 'minlength'];
+        if (p.maxLength != null && String(v).length > p.maxLength) return [label + ' (`' + v + '`, length ' + String(v).length + ') is longer than the maximum allowed length (' + p.maxLength + ').', 'maxlength'];
+        return null;
+      }
+
+      function filterMatches(doc, filter, model) {
+        for (const [k, cond] of Object.entries(filter || {})) {
+          const v = doc[k];
+          const p = model.schema.paths[k] || (k === '_id' ? { instance: 'ObjectId' } : null);
+          const cast = x => p ? castValue(p, k, x, model.modelName) : x;
+          if (cond instanceof RegExp) { if (!cond.test(String(v))) return false; continue; }
+          if (cond && typeof cond === 'object' && !Array.isArray(cond) && Object.keys(cond).some(o => o[0] === '$')) {
+            for (const [op, x] of Object.entries(cond)) {
+              if (op === '$gt' && !(v > cast(x))) return false;
+              if (op === '$gte' && !(v >= cast(x))) return false;
+              if (op === '$lt' && !(v < cast(x))) return false;
+              if (op === '$lte' && !(v <= cast(x))) return false;
+              if (op === '$ne' && v === cast(x)) return false;
+              if (op === '$eq' && v !== cast(x)) return false;
+              if (op === '$in' && !x.map(cast).includes(v)) return false;
+              if (op === '$nin' && x.map(cast).includes(v)) return false;
+              if (op === '$exists' && (v !== undefined) !== !!x) return false;
+              if (op === '$regex' && !new RegExp(x instanceof RegExp ? x.source : x, cond.$options || '').test(String(v))) return false;
+            }
+            continue;
+          }
+          if (Array.isArray(v) ? !v.includes(cast(cond)) : v !== cast(cond)) return false;
+        }
+        return true;
+      }
+
+      function Query(model, op, run) { this.model = model; this.op = op; this._run = run; this._sort = null; this._limit = null; this._skip = 0; this._select = null; }
+      Query.prototype.sort = function (s) { this._sort = typeof s === 'string' ? Object.fromEntries(s.split(/\s+/).filter(Boolean).map(k => k[0] === '-' ? [k.slice(1), -1] : [k, 1])) : s; return this; };
+      Query.prototype.limit = function (n) { this._limit = n; return this; };
+      Query.prototype.skip = function (n) { this._skip = n; return this; };
+      Query.prototype.select = function (s) { this._select = s; return this; };
+      Query.prototype.lean = function () { this._lean = true; return this; };
+      Query.prototype.populate = function () { return this; };
+      /* like Mongoose, commands wait (are "buffered") until connect() finishes, and fail after 10 s if it never does */
+      const whenConnected = (what, run) => new Promise((resolve, reject) => {
+        const started = Date.now();
+        (function attempt() {
+          if (mongo.connected) { try { resolve(run()); } catch (e) { reject(e); } return; }
+          if (Date.now() - started >= 10000) { reject(new MongooseError('Operation `' + what + '()` buffering timed out after 10000ms')); return; }
+          setTimeout(attempt, 20);
+        })();
+      });
+      Query.prototype.exec = function () {
+        return new Promise(r => setTimeout(r, 2)).then(() => whenConnected(this.model.collection.name + '.' + this.op, () => this._run(this)));
+      };
+      Query.prototype.then = function (a, b) { return this.exec().then(a, b); };
+      /* res.json(query) without await: real Mongoose fails while turning the query into JSON */
+      Query.prototype.toJSON = function () {
+        throw new TypeError("Converting circular structure to JSON\n    --> starting at object with constructor 'MongoClient'\n    |     property 's' -> object with constructor 'Object'\n    |     property 'sessionPool' -> object with constructor 'ServerSessionPool'\n    --- property 'client' closes the circle");
+      };
+      Query.prototype.catch = function (b) { return this.exec().catch(b); };
+      Query.prototype.finally = function (f) { return this.exec().finally(f); };
+
+      const models = mongo.models;
+      function model(name, schema) {
+        if (!schema) { if (models[name]) return models[name]; throw new MongooseError('Schema hasn\'t been registered for model "' + name + '".\nUse mongoose.model(name, schema)'); }
+        if (models[name]) { const e = new MongooseError('Cannot overwrite `' + name + '` model once compiled.'); e.name = 'OverwriteModelError'; throw e; }
+        if (!(schema instanceof Schema)) schema = new Schema(schema);
+        const lower = name.toLowerCase();
+        const collName = /s$/.test(lower) ? lower : /[^aeiou]y$/.test(lower) ? lower.slice(0, -1) + 'ies' : lower + 's';
+        const store = () => (mongo.db[collName] = mongo.db[collName] || []);
+        const ts = schema.options.timestamps;
+
+        /* turn input into a valid stored document, or throw a ValidationError */
+        function prepare(input, existing) {
+          const out = existing ? Object.assign({}, existing) : {};
+          const errors = {};
+          for (const [k, p] of Object.entries(schema.paths)) {
+            let v = input[k];
+            if (v === undefined && !existing && p.default !== undefined) v = typeof p.default === 'function' ? p.default() : clone(p.default);
+            if (v === undefined) { if (!existing) out[k] = undefined; } else {
+              try { out[k] = castValue(p, k, v, name); } catch (e) { errors[k] = e; continue; }
+            }
+          }
+          for (const [k, p] of Object.entries(schema.paths)) {
+            if (errors[k]) continue;
+            const m = check(p, k, out[k]);
+            if (m) errors[k] = new ValidatorError(m[0], k, m[1]);
+          }
+          if (Object.keys(errors).length) throw new ValidationError(errors, name);
+          for (const k of Object.keys(out)) if (out[k] === undefined) delete out[k];
+          return out;
+        }
+        function toDoc(raw) { return raw ? new M(raw, true) : null; }
+        function project(raw, sel) {
+          if (!sel) return raw;
+          const keys = typeof sel === 'string' ? sel.split(/\s+/).filter(Boolean) : Object.keys(sel).filter(k => sel[k]);
+          const excl = typeof sel === 'string' ? keys.filter(k => k[0] === '-').map(k => k.slice(1)) : Object.keys(sel).filter(k => !sel[k]);
+          if (keys.some(k => k[0] !== '-')) { const o = { _id: raw._id }; for (const k of keys) if (k[0] !== '-' && k in raw) o[k] = raw[k]; for (const k of excl) delete o[k]; return o; }
+          const o = Object.assign({}, raw); for (const k of excl) delete o[k]; return o;
+        }
+        const castId = id => { if (!isOid(typeof id === 'object' && id ? String(id) : id)) throw new CastError('ObjectId', id, '_id', name); return String(id); };
+        const findRaw = id => store().find(d => d._id === id);
+
+        function M(data, fromDb) {
+          if (!(this instanceof M)) return new M(data, fromDb);
+          Object.defineProperty(this, '$isNew', { value: !fromDb, writable: true, enumerable: false });
+          if (fromDb) { Object.assign(this, clone(data)); return; }
+          const o = { _id: newId() };
+          for (const [k, p] of Object.entries(schema.paths)) {
+            let v = data && data[k];
+            if (v === undefined && p.default !== undefined) v = typeof p.default === 'function' ? p.default() : clone(p.default);
+            if (v !== undefined) { try { v = castValue(p, k, v, name); } catch (e) { /* reported on save */ } o[k] = v; }
+          }
+          Object.assign(this, o);
+          Object.defineProperty(this, '$input', { value: Object.assign({}, data), enumerable: false });
+        }
+        Object.defineProperty(M.prototype, 'id', { get() { return String(this._id); } });
+        M.prototype.toJSON = M.prototype.toObject = function () { return clone(Object.assign({}, this)); };
+        M.prototype.save = function () {
+          const self = this;
+          return new Promise(r => setTimeout(r, 2)).then(() => whenConnected(collName + '.insertOne', () => {
+            {
+              const input = self.$isNew ? Object.assign({}, self.$input || {}, Object.assign({}, self)) : Object.assign({}, self);
+              const existing = self.$isNew ? null : findRaw(self._id);
+              const clean = prepare(input, existing);
+              if (self.$isNew) {
+                clean._id = self._id;
+                if (ts) { clean.createdAt = now(); clean.updatedAt = clean.createdAt; }
+                clean.__v = 0;
+                store().push(Object.assign({ _id: clean._id }, clean));   /* MongoDB keeps _id first */
+                self.$isNew = false;
+              } else {
+                if (ts) clean.updatedAt = now();
+                const i = store().findIndex(d => d._id === self._id);
+                if (i >= 0) store()[i] = clean; else store().push(clean);
+              }
+              for (const k of Object.keys(self)) delete self[k];
+              Object.assign(self, clone(clean));
+              return self;
+            }
+          }));
+        };
+        M.prototype.deleteOne = function () { const id = this._id; return new Query(M, 'deleteOne', () => { const s = store(), i = s.findIndex(d => d._id === id); if (i >= 0) s.splice(i, 1); return { acknowledged: true, deletedCount: i >= 0 ? 1 : 0 }; }); };
+
+        M.modelName = name; M.schema = schema; M.collection = { name: collName };
+        M.find = (filter, sel) => new Query(M, 'find', q => {
+          let rows = store().filter(d => filterMatches(d, filter, M));
+          if (q._sort) {
+            /* MongoDB's order: missing / null < numbers < strings < objects < booleans < dates */
+            const rank = v => v === undefined || v === null ? 0 : typeof v === 'number' ? 1 : typeof v === 'string' ? 2 : typeof v === 'boolean' ? 5 : 3;
+            const cmp = (x, y) => rank(x) - rank(y) || (x < y ? -1 : x > y ? 1 : 0);
+            const ks = Object.entries(q._sort);
+            rows = rows.slice().sort((a, b) => { for (const [k, dir] of ks) { const d = (+dir === -1 || dir === 'desc' || dir === 'descending') ? -1 : 1; const r = cmp(a[k], b[k]); if (r) return r * d; } return 0; });
+          }
+          rows = rows.slice(q._skip || 0, q._limit ? (q._skip || 0) + q._limit : undefined);
+          return rows.map(d => toDoc(project(d, sel || q._select)));
+        });
+        M.findOne = (filter, sel) => new Query(M, 'findOne', q => { const d = store().find(x => filterMatches(x, filter, M)); return d ? toDoc(project(d, sel || q._select)) : null; });
+        M.findById = (id, sel) => new Query(M, 'findOne', q => { if (id === undefined || id === null) return null; const d = findRaw(castId(id)); return d ? toDoc(project(d, sel || q._select)) : null; });
+        M.countDocuments = filter => new Query(M, 'countDocuments', () => store().filter(d => filterMatches(d, filter, M)).length);
+        M.exists = filter => new Query(M, 'findOne', () => { const d = store().find(x => filterMatches(x, filter, M)); return d ? { _id: d._id } : null; });
+        M.create = function (data) {
+          if (Array.isArray(data)) return Promise.all(data.map(d => new M(d).save()));
+          if (arguments.length > 1) return Promise.all([...arguments].map(d => new M(d).save()));
+          return new M(data).save();
+        };
+        M.insertMany = arr => (async () => { const out = []; for (const d of arr) out.push(await new M(d).save()); return out; })();
+        M.deleteMany = filter => new Query(M, 'deleteMany', () => { const s = store(), keep = s.filter(d => !filterMatches(d, filter, M)), n = s.length - keep.length; mongo.db[collName] = keep; return { acknowledged: true, deletedCount: n }; });
+        M.deleteOne = filter => new Query(M, 'deleteOne', () => { const s = store(), i = s.findIndex(d => filterMatches(d, filter, M)); if (i >= 0) s.splice(i, 1); return { acknowledged: true, deletedCount: i >= 0 ? 1 : 0 }; });
+        function applyUpdate(raw, update, opts) {
+          const set = Object.assign({}, update && update.$set ? update.$set : {});
+          for (const [k, v] of Object.entries(update || {})) if (k[0] !== '$') set[k] = v;
+          const next = Object.assign({}, raw), errors = {};
+          for (const [k, v] of Object.entries(set)) {
+            if (v === undefined) continue;
+            const p = schema.paths[k];
+            if (!p) continue;   /* strict mode: fields that are not in the schema are dropped */
+            next[k] = castValue(p, k, v, name);   /* Mongoose throws the CastError itself here, not a ValidationError */
+          }
+          if (opts && opts.runValidators) {
+            for (const [k, p] of Object.entries(schema.paths)) {
+              if (!(k in set) || set[k] === undefined) continue;
+              const m = check(p, k, next[k]); if (m) errors[k] = new ValidatorError(m[0], k, m[1]);
+            }
+          }
+          if (Object.keys(errors).length) throw new ValidationError(errors);
+          if (ts) next.updatedAt = now();
+          return next;
+        }
+        let warnedNew = false;
+        M.findByIdAndUpdate = (id, update, opts) => new Query(M, 'findOneAndUpdate', q => {
+          opts = opts || {};
+          if ('new' in opts && !warnedNew) { warnedNew = true; console.warn('[MONGOOSE] Warning: mongoose: the `new` option for `findOneAndUpdate()` and `findOneAndReplace()` is deprecated. Use `returnDocument: \'after\'` instead.'); }
+          const after = opts.returnDocument === 'after' || opts.new === true;
+          const raw = findRaw(castId(id));
+          if (!raw) return null;
+          const next = applyUpdate(raw, update, opts);
+          const s = store(), i = s.indexOf(raw); s[i] = next;
+          return toDoc(project(after ? next : raw, q._select));
+        });
+        M.findOneAndUpdate = (filter, update, opts) => new Query(M, 'findOneAndUpdate', q => { const d = store().find(x => filterMatches(x, filter, M)); return d ? M.findByIdAndUpdate(d._id, update, opts)._run(q) : null; });
+        M.updateOne = (filter, update, opts) => new Query(M, 'updateOne', () => { const s = store(), i = s.findIndex(x => filterMatches(x, filter, M)); if (i < 0) return { acknowledged: true, matchedCount: 0, modifiedCount: 0 }; s[i] = applyUpdate(s[i], update, opts); return { acknowledged: true, matchedCount: 1, modifiedCount: 1 }; });
+        M.findByIdAndDelete = id => new Query(M, 'findOneAndDelete', () => { const raw = findRaw(castId(id)); if (!raw) return null; const s = store(); s.splice(s.indexOf(raw), 1); return toDoc(raw); });
+        M.findOneAndDelete = filter => new Query(M, 'findOneAndDelete', () => { const s = store(), i = s.findIndex(x => filterMatches(x, filter, M)); if (i < 0) return null; const [raw] = s.splice(i, 1); return toDoc(raw); });
+        models[name] = M;
+        return M;
+      }
+
+      const connection = { readyState: 0, on() { return connection; }, once() { return connection; }, close: () => Promise.resolve() };
+      const mongoose = {
+        Schema, model, models, connection, Error: { ValidationError, CastError, ValidatorError },
+        Types: { ObjectId: Object.assign(function ObjectId(v) { return v ? String(v) : newId(); }, { isValid: isOid }) },
+        isValidObjectId: isOid, set() { return mongoose; }, get() {},
+        connect(uri, opts) {
+          if (typeof uri !== 'string') {
+            return Promise.reject(new MongooseError('The `uri` parameter to `openUri()` must be a string, got "' + typeof uri + '". Make sure the first parameter to `mongoose.connect()` or `mongoose.createConnection()` is a string.'));
+          }
+          mongo.connects.push(uri);
+          if (!/^mongodb(\+srv)?:\/\//.test(uri)) return Promise.reject(new MongooseError('Invalid scheme, expected connection string to start with "mongodb://" or "mongodb+srv://"'));
+          server.pending = (server.pending || 0) + 1;
+          return new Promise(resolve => setTimeout(() => {
+            mongo.connected = true; connection.readyState = 1;
+            resolve(mongoose);
+            setTimeout(() => { server.pending--; }, 30);   /* let .then(() => app.listen(...)) run first */
+          }, 25));
+        },
+        disconnect() { mongo.connected = false; connection.readyState = 0; return Promise.resolve(); }
+      };
+      mongoose.default = mongoose;
+      return mongoose;
+    }
+
+    /* dotenv: the lab sets process.env from LAB.mongo.env, so config() only has to exist */
+    const dotenv = { config: () => ({ parsed: Object.assign({}, (W.__labMongoCfg || {}).env || {}) }) };
+    dotenv.default = dotenv;
+    /* cors(): allow every origin, as the real package does by default */
+    const cors = () => function corsMiddleware(req, res, next) {
+      res.set('Access-Control-Allow-Origin', '*');
+      if (req.method === 'OPTIONS') { res.status(204); return res.end(); }
+      next();
+    };
+    cors.default = cors;
+    const modules = { express, path, mongoose: mongooseLike(), dotenv, cors };
     W.__require = name => {
       const n = String(name).replace(/^node:/, '');
       if (modules[n]) return modules[n];
-      const e = new Error("Cannot find module '" + name + "' (this lab can only import express)"); e.code = 'MODULE_NOT_FOUND'; throw e;
+      const e = new Error("Cannot find module '" + name + "' (this lab can only import express, mongoose, dotenv and cors)"); e.code = 'MODULE_NOT_FOUND'; throw e;
     };
     W.__module = { exports: {} };
-    W.__process = { env: {}, argv: ['node', 'server.js'], platform: 'browser', version: 'v24.0.0', versions: { node: '24.0.0' }, exit() {}, on() {}, cwd: () => '/app' };
+    W.__process = { env: Object.assign({}, (W.__labMongoCfg || {}).env || {}), argv: ['node', 'server.js'], platform: 'browser', version: 'v24.0.0', versions: { node: '24.0.0' }, exit() {}, on() {}, cwd: () => '/app' };
 
     /* one request in, one response out: { status, headers, body }, or { status: 0, refused | timeout } */
     server.request = (o = {}) => new Promise(resolve => {
+      let waited = 0;
+      (function attempt() {
       const app = server.app;
+      /* a server that is still connecting to its database (mongoose.connect, then app.listen) gets up to 3 s */
+      if (!app && server.pending > 0 && waited < 3000) { waited += 20; setTimeout(attempt, 20); return; }
       if (!app) { resolve({ status: 0, refused: true, headers: {}, body: '' }); return; }
       let done = false;
       const timer = setTimeout(() => { if (!done) { done = true; resolve({ status: 0, timeout: true, headers: {}, body: '' }); } }, o.timeout || 1500);
@@ -284,6 +617,7 @@ const ExpressLab = (() => {
       const res = makeRes(req, r => { if (!done) { done = true; clearTimeout(timer); resolve(r); } });
       req.res = res; req.app = res.app = app;
       try { app.handle(req, res); } catch (e) { finalhandler(e, req, res); }
+      })();
     });
   }
 
@@ -467,7 +801,8 @@ body { display: flex; flex-direction: column; background: #fff; font: 13px syste
     const body = '(function (require, module, exports, process, __dirname, __filename) {\'use strict\';' + transform(js) +
       '\n}).call({}, __require, __module, __module.exports, __process, \'/app\', \'/app/server.js\');';
     const doc = '<!DOCTYPE html>\n<html lang="en"><head><meta charset="utf-8">' + probe + '<style>' + css + '</style></head><body>\n' +
-      '<script>' + (typeof LAB !== 'undefined' && LAB.apiTester ? 'window.__labApi=true;' : '') + '(' + runtime.toString() + ')();\n(' + shell.toString() + ')();<\/script>\n' +
+      '<script>' + (typeof LAB !== 'undefined' && LAB.apiTester ? 'window.__labApi=true;' : '') +
+      (typeof LAB !== 'undefined' && LAB.mongo ? 'window.__labMongoCfg=' + JSON.stringify(LAB.mongo).replace(/</g, '\\u003c') + ';' : '') + '(' + runtime.toString() + ')();\n(' + shell.toString() + ')();<\/script>\n' +
       '<script>window.__labJsStart=@@LINE@@;window.__labJsLines=' + String(js || '').split('\n').length + ';<\/script>\n' +
       '<script id="lab-js">\n' + body.replace(/<\/script/gi, '<\\/script') + '\n<\/script>\n' +
       '<script>__labBrowser.start(' + JSON.stringify(start) + ');<\/script>\n</body></html>';
