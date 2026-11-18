@@ -7,8 +7,8 @@
 const LAB = {
   title: 'REST API Code Lab: Movie Night API',                    // big title on the home page and in the browser tab
   brand: 'REST API Lab',                    // short name beside the logo in the top bar, e.g. "Code Lab"
-  kicker: 'CSIS 3380 · Module 9 · REST APIs with Express',                  // small line above the title, e.g. "CSIS 1280 · Modules 1 to 6"
-  scope: 'Module 9',                    // used in sentences, e.g. "Modules 1–6"
+  kicker: 'CSIS 3380 · Module 8 · REST APIs with Express',                  // small line above the title, e.g. "CSIS 1280 · Modules 1 to 6"
+  scope: 'Module 8',                    // used in sentences, e.g. "Modules 1–6"
   lead: 'Build a REST API for Movie Night in eight steps: JSON routes, route parameters, query strings, POST, PUT, DELETE, status codes and error handling. Each step gives you four tries, with guidance after every try; at the end you get your total and a PDF report.',
   footer: 'CSIS 3380 · Full Stack Development with JavaScript',                  // footer text, e.g. "CSIS 1280 · Web Design"
   storageKey: 'codeLab.rest-api-code-lab-movie-night-api.v1',         // unique per lab, so two labs never share progress
@@ -51,7 +51,7 @@ const LAB = {
     review: true,                        // every try shows why each failed check matters (guidance), not only what was found
     reportTag: 'REST-API-Lab',
     rules: [
-      'This lab practises **Module 9: REST APIs with Express**. Do the tutorial **Build a REST API with Express** first.',
+      'This lab practises **Module 8: REST APIs with Express**. Do the tutorial **Build a REST API with Express** first.',
       'Do the steps in order. Each step has **four tries**: after each try you see what your API answered and why each check matters. Your best try counts.',
       'Test your API in the panel beside the code before you check an answer: every check uses up a try.',
       'The checks test what your API **does** (status codes, JSON, what is saved), not how the code is written.',
